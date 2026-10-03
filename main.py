@@ -7,6 +7,31 @@ from database import Base, engine, SessionLocal
 
 app = FastAPI()
 
+def compute_hotspot_temp(load, rated_power, ambient=30,
+                          delta_oil_rated=45, delta_hs_rated=23,
+                          R=5, x=0.8, y=1.6):
+    K = load / rated_power
+    delta_oil = delta_oil_rated * ((1 + R * K**2) / (1 + R)) ** x
+    delta_hs = delta_hs_rated * K ** y
+    return ambient + delta_oil + delta_hs
+
+
+def ageing_rate(hotspot_temp, reference_temp=98):
+    return 2 ** ((hotspot_temp - reference_temp) / 6)
+
+def assess_health(load, rated_power):
+    hst = compute_hotspot_temp(load, rated_power)
+    rate = ageing_rate(hst)
+
+    if hst < 98:
+        label = "Normal"
+    elif hst < 120:
+        label = "Elevated"
+    else:
+        label = "Critical"
+
+    return hst, rate, label
+
 ## pydantic model
 
 
@@ -53,8 +78,11 @@ class MeasurementResponse(BaseModel):
 class AssetHealthResponse(BaseModel):
     asset_id: int
     asset_name: str
-    temperature: int
+    measured_temperature: int
+    computed_hotspot_temp: float
+    ageing_rate: float
     health: str
+    model_config = ConfigDict(from_attributes=True)
 
 class MaintenanceCreate(BaseModel):
     asset_id: int
@@ -78,6 +106,8 @@ class AssetStatusResponse(BaseModel):
     status: str
     health: str
     latest_temperature: int
+    computed_hotspot_temp: float
+    ageing_rate: float
     latest_load: int
     last_measurement: datetime
 
@@ -216,7 +246,6 @@ def get_asset_measurements(asset_id: int, db=Depends(get_db)):
 @app.get("/assets/{asset_id}/health", response_model=AssetHealthResponse)
 def get_asset_health(asset_id: int, db=Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
 
@@ -226,24 +255,17 @@ def get_asset_health(asset_id: int, db=Depends(get_db)):
         .order_by(Measurement.id.desc())
         .first()
     )
-
     if measurement is None:
-        return {
-            "asset_id": asset_id,
-            "status": "No measurements available"
-        }
+        raise HTTPException(status_code=404, detail="No measurements available")
 
-    if measurement.temperature >= 80:
-        health = "Critical"
-    elif measurement.temperature >= 65:
-        health = "Warning"
-    else:
-        health = "Healthy"
+    hst, rate, health = assess_health(measurement.load, asset.rated_power)
 
     return {
         "asset_id": asset_id,
         "asset_name": asset.name,
-        "temperature": measurement.temperature,
+        "measured_temperature": measurement.temperature,
+        "computed_hotspot_temp": round(hst, 2),
+        "ageing_rate": round(rate, 3),
         "health": health
     }
  
@@ -266,7 +288,6 @@ def get_asset_maintenance(asset_id: int, db=Depends(get_db)):
 @app.get("/assets/{asset_id}/status", response_model=AssetStatusResponse)
 def get_asset_status(asset_id: int, db=Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
-
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
 
@@ -276,19 +297,10 @@ def get_asset_status(asset_id: int, db=Depends(get_db)):
         .order_by(Measurement.recorded_at.desc())
         .first()
     )
-
     if measurement is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No measurements available"
-        )
+        raise HTTPException(status_code=404, detail="No measurements available")
 
-    if measurement.temperature >= 80:
-        health = "Critical"
-    elif measurement.temperature >= 65:
-        health = "Warning"
-    else:
-        health = "Healthy"
+    hst, rate, health = assess_health(measurement.load, asset.rated_power)
 
     return {
         "asset_id": asset.id,
@@ -296,6 +308,8 @@ def get_asset_status(asset_id: int, db=Depends(get_db)):
         "status": asset.status,
         "health": health,
         "latest_temperature": measurement.temperature,
+        "computed_hotspot_temp": round(hst, 2),
+        "ageing_rate": round(rate, 3),
         "latest_load": measurement.load,
         "last_measurement": measurement.recorded_at
     }
@@ -320,6 +334,31 @@ def update_asset(asset_id: int, asset: AssetCreate, db=Depends(get_db)):
     db.refresh(db_asset)
 
     return db_asset
+
+@app.get("/assets/{asset_id}/health-history")
+def get_asset_health_history(asset_id: int, db=Depends(get_db)):
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    measurements = (
+        db.query(Measurement)
+        .filter(Measurement.asset_id == asset_id)
+        .order_by(Measurement.recorded_at.asc())
+        .all()
+    )
+
+    results = []
+    for m in measurements:
+        hst, rate, health = assess_health(m.load, asset.rated_power)
+        results.append({
+            "recorded_at": m.recorded_at,
+            "load": m.load,
+            "computed_hotspot_temp": round(hst, 2),
+            "ageing_rate": round(rate, 3),
+            "health": health
+        })
+    return results
 
 
 

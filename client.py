@@ -4,7 +4,7 @@ data = {
     "asset_id": 1,
     "voltage": 433,
     "current": 520,
-    "temperature": 68,
+    "temperature": 80,
     "load": 350
 }
 
