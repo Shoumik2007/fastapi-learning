@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy.orm import relationship
 from database import Base, engine, SessionLocal
 
-app = FastAPI()
+app = FastAPI(title="Transformer API")
 
 def compute_hotspot_temp(load, rated_power, ambient=30,
                           delta_oil_rated=45, delta_hs_rated=23,
